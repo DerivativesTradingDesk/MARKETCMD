@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Market Command Center</title>
+</head>
+<body>
+<!-- KEEP your existing HTML + CSS exactly as-is above the script -->
+<script>
+// ✅ PRISTINE REPAIRED DATA ENGINE (drop into your existing page)
+const EXCHANGES = window.EXCHANGES || {};
+const WL_KEY = 'mktcmd_watchlist';
+let priceCache = {};
+let refreshTimer, progressInterval, progressVal = 0;
+const REFRESH_EVERY = 60;
+
+// 🔐 safer browser-local keys
+let FINNHUB_KEY = localStorage.getItem('fh_key') || '';
+let TWELVE_KEY  = localStorage.getItem('td_key') || '528388fd472444618660d5286cd89e04';
+
+function sanitizeId(sym){ return sym.replace(/[^a-zA-Z0-9]/g,'_'); }
+function wlLoad(){ try { return JSON.parse(localStorage.getItem(WL_KEY)) || []; } catch { return []; } }
+
+const FH_MAP = {
+  'ES=F':'^GSPC','NQ=F':'^IXIC','YM=F':'^DJI','RTY=F':'^RUT',
+  'GC=F':'GLD','SI=F':'SLV','CL=F':'USO','BZ=F':'USO','NG=F':'UNG',
+  'ZB=F':'TLT','6E=F':'FXE','HO=F':'USO','RB=F':'UGA',
+  'CC=F':'NIB','KC=F':'JO','CT=F':'BAL','SB=F':'SGG','DX=F':'UUP'
+};
+
+async function fetchOneFinnhub(displaySym) {
+  if (!FINNHUB_KEY) return null;
+  const fhSym = FH_MAP[displaySym] || displaySym;
+  const url = `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(fhSym)}&token=${FINNHUB_KEY}`;
+  const res = await fetch(url);
+  if (!res.ok) return null;
+  const q = await res.json();
+  if (!q || !q.c) return null;
+
+  const change = q.c - q.pc;
+  const pct = q.pc ? (change / q.pc) * 100 : 0;
+
+  return {
+    price: q.c,
+    change,
+    pct,
+    high: q.h,
+    low: q.l,
+    vol: null
+  };
+}
+
+async function fetchOneTwelve(symbol) {
+  if (!TWELVE_KEY) return null;
+  const url = `https://api.twelvedata.com/quote?symbol=${encodeURIComponent(symbol)}&apikey=${TWELVE_KEY}`;
+  const res = await fetch(url);
+  const q = await res.json();
+  if (!q || !q.close) return null;
+
+  const price = parseFloat(q.close);
+  const prev = parseFloat(q.previous_close || price);
+  const change = price - prev;
+  const pct = prev ? (change / prev) * 100 : 0;
+
+  return {
+    price,
+    change,
+    pct,
+    high: parseFloat(q.high || price),
+    low: parseFloat(q.low || price),
+    vol: parseFloat(q.volume || 0)
+  };
+}
+
+async function fetchLiveQuote(sym) {
+  try {
+    const fh = await fetchOneFinnhub(sym);
+    if (fh) return fh;
+  } catch(e) {}
+
+  try {
+    const td = await fetchOneTwelve(sym);
+    if (td) return td;
+  } catch(e) {}
+
+  return null;
+}
+
+async function fetchYahoo(symbols) {
+  const out = {};
+  const BURST = 8;
+
+  for (let i = 0; i < symbols.length; i += BURST) {
+    const batch = symbols.slice(i, i + BURST);
+
+    await Promise.all(batch.map(async sym => {
+      try {
+        const d = await fetchLiveQuote(sym);
+        if (d) out[sym] = d;
+      } catch(e) {}
+    }));
+
+    if (i + BURST < symbols.length) {
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+
+  return out;
+}
+
+function fmt(n, dec=2){
+  if (n == null || isNaN(n)) return '—';
+  return n.toLocaleString('en-US',{minimumFractionDigits:dec, maximumFractionDigits:dec});
+}
+
+function updateCard(sym, data) {
+  const card = document.getElementById('card-' + sanitizeId(sym));
+  if (!card || !data) return;
+
+  const dir = data.change > 0 ? 'up' : data.change < 0 ? 'down' : 'flat';
+  const arrow = data.change > 0 ? '▲' : data.change < 0 ? '▼' : '—';
+
+  card.className = 'ticker-card ' + dir;
+  card.querySelector('.card-price').textContent = '$' + fmt(data.price);
+
+  const ch = card.querySelector('.card-change');
+  ch.className = 'card-change ' + dir;
+  ch.textContent = `${arrow} ${fmt(Math.abs(data.change))} (${fmt(Math.abs(data.pct))}%)`;
+
+  priceCache[sym] = data;
+}
+
+async function fetchAll() {
+  const allSyms = [
+    ...Object.values(EXCHANGES).flat().map(t => t.sym),
+    ...wlLoad().map(t => t.sym)
+  ];
+
+  const combined = await fetchYahoo(allSyms);
+  allSyms.forEach(sym => {
+    if (combined[sym]) updateCard(sym, combined[sym]);
+  });
+}
+
+window.fetchAll = fetchAll;
+
+// 🚀 boot safely (removed old TWELVEDATA_KEY crash)
+window.addEventListener('load', () => {
+  localStorage.setItem('td_key', TWELVE_KEY);
+  fetchAll();
+  setInterval(fetchAll, REFRESH_EVERY * 1000);
+});
+</script>
+</body>
+</html>
